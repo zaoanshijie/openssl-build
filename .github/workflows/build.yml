@@ -348,6 +348,10 @@ jobs:
             echo "Release '$TAG' already exists, skipping"
             exit 0
           fi
+          PRE_FLAG=""
+          if echo "${{ matrix.version }}" | grep -qiE '-(alpha|beta|dev|rc)'; then
+            PRE_FLAG="--prerelease"
+          fi
           gh release create "$TAG" artifacts/*.tar.gz \
             --title "OpenSSL ${{ matrix.version }}" \
             --notes "Prebuilt OpenSSL ${{ matrix.version }} binaries.
@@ -360,4 +364,5 @@ jobs:
           - ubuntu-gcc-x86_64
           - ubuntu-gcc-aarch64
           - ubuntu-clang-x86_64
-          - ubuntu-clang-aarch64"
+          - ubuntu-clang-aarch64" \
+            $PRE_FLAG
