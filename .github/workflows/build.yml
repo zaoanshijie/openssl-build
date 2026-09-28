@@ -1,0 +1,224 @@
+name: Build OpenSSL
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch:
+    inputs:
+      openssl_ref:
+        description: 'OpenSSL branch/tag/commit'
+        type: string
+        default: 'openssl-3.4.0'
+
+env:
+  OPENSSL_VERSION_INPUT: ${{ inputs.openssl_ref || 'openssl-3.4.1' }}
+  LLVM_MINGW_VERSION: '20240903'
+  LLVM_MINGW_UCRT: 'ucrt'
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: MSVC x64
+            os: windows-latest
+            arch: amd64
+            target: VC-WIN64A
+            compiler: msvc
+            platform: windows
+            bits: 64
+
+          - name: MSVC x86
+            os: windows-latest
+            arch: x86
+            target: VC-WIN32
+            compiler: msvc
+            platform: windows
+            bits: 32
+
+          - name: LLVM-MinGW x64
+            os: ubuntu-latest
+            target: mingw64
+            compiler: llvm-mingw
+            platform: windows
+            bits: 64
+            cross_prefix: x86_64-w64-mingw32-
+
+          - name: LLVM-MinGW x86
+            os: ubuntu-latest
+            target: mingw
+            compiler: llvm-mingw
+            platform: windows
+            bits: 32
+            cross_prefix: i686-w64-mingw32-
+
+          - name: GCC x64
+            os: ubuntu-latest
+            compiler: gcc
+            platform: linux
+            bits: 64
+            target: linux-x86_64
+
+          - name: GCC x86
+            os: ubuntu-latest
+            compiler: gcc
+            platform: linux
+            bits: 32
+            target: linux-x86
+
+          - name: Clang x64
+            os: ubuntu-latest
+            compiler: clang
+            platform: linux
+            bits: 64
+            target: linux-x86_64-clang
+
+          - name: Clang x86
+            os: ubuntu-latest
+            compiler: clang
+            platform: linux
+            bits: 32
+            target: linux-x86-clang
+
+    steps:
+      - name: Checkout OpenSSL
+        uses: actions/checkout@v4
+        with:
+          repository: openssl/openssl
+          ref: ${{ env.OPENSSL_VERSION_INPUT }}
+          path: openssl
+
+      - name: Setup MSVC (Windows)
+        if: matrix.compiler == 'msvc'
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: ${{ matrix.arch }}
+
+      - name: Install NASM and Strawberry Perl (MSVC)
+        if: matrix.compiler == 'msvc'
+        shell: pwsh
+        run: |
+          choco install nasm strawberryperl --no-progress -y
+          Write-Output "$env:ChocolateyInstall\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          $env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
+          Write-Output "C:\Strawberry\perl\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          Write-Output "C:\Strawberry\c\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      - name: Verify MSVC tools
+        if: matrix.compiler == 'msvc'
+        shell: pwsh
+        run: |
+          perl --version
+          nasm --version
+          nmake /? 2>&1 | Select-Object -First 1
+
+      - name: Setup LLVM-MinGW (Linux)
+        if: matrix.compiler == 'llvm-mingw'
+        run: |
+          LLVM_MINGW_TAR="llvm-mingw-${{ env.LLVM_MINGW_VERSION }}-${{ env.LLVM_MINGW_UCRT }}-ubuntu-22.04-x86_64.tar.xz"
+          curl -fsSLO "https://github.com/mstorsjo/llvm-mingw/releases/download/${{ env.LLVM_MINGW_VERSION }}/${LLVM_MINGW_TAR}"
+          tar -xf "${LLVM_MINGW_TAR}"
+          echo "$(pwd)/llvm-mingw-${{ env.LLVM_MINGW_VERSION }}-${{ env.LLVM_MINGW_UCRT }}-ubuntu-22.04-x86_64/bin" >> $GITHUB_PATH
+
+      - name: Verify LLVM-MinGW tools
+        if: matrix.compiler == 'llvm-mingw'
+        run: |
+          ${{ matrix.cross_prefix }}gcc --version
+
+      - name: Install 32-bit multilib (GCC/Linux x86)
+        if: matrix.bits == 32 && matrix.platform == 'linux'
+        run: |
+          sudo dpkg --add-architecture i386
+          sudo apt-get update
+          sudo apt-get install -y gcc-multilib g++-multilib linux-libc-dev:i386 libc6-dev:i386
+
+      - name: Install Clang (Linux)
+        if: matrix.compiler == 'clang'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang llvm
+
+      - name: Verify compiler (Unix)
+        if: matrix.os == 'ubuntu-latest' && matrix.compiler != 'llvm-mingw'
+        run: |
+          case "${{ matrix.compiler }}" in
+            gcc) gcc --version ;;
+            clang) clang --version ;;
+          esac
+
+      - name: Install Perl (Unix)
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get install -y perl
+
+      - name: Configure OpenSSL (MSVC)
+        if: matrix.compiler == 'msvc'
+        shell: pwsh
+        working-directory: openssl
+        run: |
+          perl Configure ${{ matrix.target }} --prefix="$env:RUNNER_TEMP\openssl-install" --openssldir="$env:RUNNER_TEMP\openssl-install\ssl" no-makedepend
+
+      - name: Configure OpenSSL (LLVM-MinGW)
+        if: matrix.compiler == 'llvm-mingw'
+        working-directory: openssl
+        run: |
+          perl Configure ${{ matrix.target }} --cross-compile-prefix=${{ matrix.cross_prefix }} --prefix=/tmp/openssl-install --openssldir=/tmp/openssl-install/ssl no-makedepend
+
+      - name: Configure OpenSSL (GCC/Clang Linux)
+        if: matrix.os == 'ubuntu-latest' && matrix.compiler != 'llvm-mingw'
+        working-directory: openssl
+        run: |
+          perl Configure ${{ matrix.target }} --prefix=/tmp/openssl-install --openssldir=/tmp/openssl-install/ssl no-makedepend
+
+      - name: Build OpenSSL (MSVC)
+        if: matrix.compiler == 'msvc'
+        shell: pwsh
+        working-directory: openssl
+        run: nmake
+
+      - name: Build OpenSSL (Unix)
+        if: matrix.os == 'ubuntu-latest'
+        working-directory: openssl
+        run: make -j$(nproc)
+
+      - name: Test OpenSSL (MSVC)
+        if: matrix.compiler == 'msvc'
+        shell: pwsh
+        working-directory: openssl
+        run: nmake test
+
+      - name: Test OpenSSL (Unix)
+        if: matrix.os == 'ubuntu-latest' && matrix.compiler != 'llvm-mingw'
+        working-directory: openssl
+        run: |
+          make -j$(nproc) test
+
+      - name: Install OpenSSL (MSVC)
+        if: matrix.compiler == 'msvc'
+        shell: pwsh
+        working-directory: openssl
+        run: nmake install
+
+      - name: Install OpenSSL (Unix)
+        if: matrix.os == 'ubuntu-latest'
+        working-directory: openssl
+        run: make install
+
+      - name: Upload artifacts (Windows MSVC)
+        if: matrix.compiler == 'msvc'
+        uses: actions/upload-artifact@v4
+        with:
+          name: openssl-${{ matrix.name }}
+          path: ${{ runner.temp }}\openssl-install
+
+      - name: Upload artifacts (Unix)
+        if: matrix.os == 'ubuntu-latest'
+        uses: actions/upload-artifact@v4
+        with:
+          name: openssl-${{ matrix.name }}
+          path: /tmp/openssl-install

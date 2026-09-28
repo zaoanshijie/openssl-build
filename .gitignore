@@ -1,0 +1,3 @@
+/openssl/
+*.log
+*.tmp
