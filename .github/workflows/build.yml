@@ -26,8 +26,9 @@ jobs:
           r = subprocess.run(['git', 'ls-remote', '--tags',
               'https://github.com/openssl/openssl.git'],
               capture_output=True, text=True)
-          tags = re.findall(r'refs/tags/(openssl-\d+\.\d+\.\d+)$', r.stdout, re.M)
-          versions = sorted(set(tags),
+          tags = re.findall(r'refs/tags/(openssl-(3|4)\.\d+\.\d+)$', r.stdout, re.M)
+          stable = [t[0] for t in tags]
+          versions = sorted(set(stable),
               key=lambda v: tuple(int(x) for x in v.replace('openssl-','').split('.')),
               reverse=True)
           latest = versions[0]
@@ -189,7 +190,7 @@ jobs:
           perl Configure ${{ matrix.config.target }} ${{ env.OPENSSL_FLAGS_COMMON }} `
             --with-zlib-include="${{ steps.zlib-msvc.outputs.zlib_include }}" `
             --with-zlib-lib="${{ steps.zlib-msvc.outputs.zlib_lib }}" `
-            --prefix="./install"
+            --prefix="$env:GITHUB_WORKSPACE\openssl\install"
 
       - name: Configure (LLVM-MinGW)
         if: matrix.config.compiler == 'llvm-mingw'
@@ -200,7 +201,7 @@ jobs:
             ${{ env.OPENSSL_FLAGS_COMMON }} \
             --with-zlib-include=${{ steps.zlib-mingw.outputs.zlib_include }} \
             --with-zlib-lib=${{ steps.zlib-mingw.outputs.zlib_lib }} \
-            --prefix=./install
+            --prefix=$GITHUB_WORKSPACE/openssl/install
 
       - name: Configure (GCC x86_64 / Clang x86_64)
         if: (matrix.config.compiler == 'gcc' || matrix.config.compiler == 'clang') && matrix.config.target != 'linux-aarch64'
@@ -208,7 +209,7 @@ jobs:
         run: |
           perl Configure ${{ matrix.config.target }} \
             ${{ env.OPENSSL_FLAGS_COMMON }} \
-            --prefix=./install
+            --prefix=$GITHUB_WORKSPACE/openssl/install
 
       - name: Configure (GCC/Clang aarch64)
         if: (matrix.config.compiler == 'gcc' || matrix.config.compiler == 'clang') && matrix.config.target == 'linux-aarch64'
@@ -218,7 +219,7 @@ jobs:
           export CXX=${{ matrix.config.compiler == 'gcc' && 'g++' || 'clang++' }}
           perl Configure linux-aarch64 \
             ${{ env.OPENSSL_FLAGS_COMMON }} \
-            --prefix=./install
+            --prefix=$GITHUB_WORKSPACE/openssl/install
 
       # ==================== BUILD ====================
       - name: Build (MSVC)
@@ -267,28 +268,28 @@ jobs:
         if: matrix.config.compiler == 'gcc' || matrix.config.compiler == 'clang'
         working-directory: openssl
         run: |
-          ./install/bin/openssl version
-          ./install/bin/openssl list -providers
-          ./install/bin/openssl ciphers -v ALL:COMPLEMENTOFALL | head -20
+          $GITHUB_WORKSPACE/openssl/install/bin/openssl version
+          $GITHUB_WORKSPACE/openssl/install/bin/openssl list -providers
+          $GITHUB_WORKSPACE/openssl/install/bin/openssl ciphers -v ALL:COMPLEMENTOFALL | head -20
 
       - name: Verify (LLVM-MinGW)
         if: matrix.config.compiler == 'llvm-mingw'
         working-directory: openssl
         run: |
-          file ./install/bin/openssl.exe
+          file $GITHUB_WORKSPACE/openssl/install/bin/openssl.exe
 
       - name: Verify (MSVC)
         if: matrix.config.compiler == 'msvc'
         shell: pwsh
         working-directory: openssl
         run: |
-          & ./install/bin/openssl.exe version
-          & ./install/bin/openssl.exe list -providers
-          & ./install/bin/openssl.exe ciphers -v ALL:COMPLEMENTOFALL | Select-Object -First 20
+          & $env:GITHUB_WORKSPACE\openssl\install\bin\openssl.exe version
+          & $env:GITHUB_WORKSPACE\openssl\install\bin\openssl.exe list -providers
+          & $env:GITHUB_WORKSPACE\openssl\install\bin\openssl.exe ciphers -v ALL:COMPLEMENTOFALL | Select-Object -First 20
 
       # ==================== UPLOAD ====================
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
           name: openssl-${{ matrix.version }}-${{ matrix.config.name }}
-          path: openssl/install
+          path: ${{ github.workspace }}/openssl/install
