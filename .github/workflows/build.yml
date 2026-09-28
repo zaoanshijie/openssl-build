@@ -1,224 +1,294 @@
 name: Build OpenSSL
 
 on:
+  schedule:
+    - cron: '0 1 * * *'
   push:
-    branches: [main, master]
-  pull_request:
-    branches: [main, master]
+    branches: [main]
   workflow_dispatch:
-    inputs:
-      openssl_ref:
-        description: 'OpenSSL branch/tag/commit'
-        type: string
-        default: 'openssl-3.4.0'
 
-env:
-  OPENSSL_VERSION_INPUT: ${{ inputs.openssl_ref || 'openssl-3.4.1' }}
-  LLVM_MINGW_VERSION: '20240903'
-  LLVM_MINGW_UCRT: 'ucrt'
+permissions:
+  contents: read
 
 jobs:
+  detect-versions:
+    name: Detect OpenSSL versions
+    runs-on: ubuntu-latest
+    outputs:
+      versions: ${{ steps.versions.outputs.versions }}
+    steps:
+      - name: Detect stable releases
+        id: versions
+        run: |
+          VERSIONS=$(python3 -c "
+          import subprocess, re, json
+
+          r = subprocess.run(['git', 'ls-remote', '--tags',
+              'https://github.com/openssl/openssl.git'],
+              capture_output=True, text=True)
+          tags = re.findall(r'refs/tags/(openssl-\d+\.\d+\.\d+)$', r.stdout, re.M)
+          versions = sorted(set(tags),
+              key=lambda v: tuple(int(x) for x in v.replace('openssl-','').split('.')),
+              reverse=True)
+          latest = versions[0]
+
+          specific = ['openssl-3.0.22', 'openssl-3.6.4']
+          all_versions = specific + [latest]
+          seen = set()
+          unique = []
+          for v in all_versions:
+              if v not in seen:
+                  unique.append(v)
+                  seen.add(v)
+
+          print(json.dumps(unique))
+          ")
+          echo "versions=$VERSIONS" >> $GITHUB_OUTPUT
+          echo "Detected versions: $VERSIONS"
+
   build:
-    name: ${{ matrix.name }}
-    runs-on: ${{ matrix.os }}
+    name: ${{ matrix.config.name }} / ${{ matrix.version }}
+    needs: detect-versions
+    runs-on: ${{ matrix.config.os }}
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - name: MSVC x64
+        version: ${{ fromJson(needs.detect-versions.outputs.versions) }}
+        config:
+          - name: windows-msvc
             os: windows-latest
-            arch: amd64
+            compiler: msvc
             target: VC-WIN64A
-            compiler: msvc
-            platform: windows
-            bits: 64
+            arch: amd64
 
-          - name: MSVC x86
-            os: windows-latest
-            arch: x86
-            target: VC-WIN32
-            compiler: msvc
-            platform: windows
-            bits: 32
-
-          - name: LLVM-MinGW x64
+          - name: windows-llvm-mingw
             os: ubuntu-latest
-            target: mingw64
             compiler: llvm-mingw
-            platform: windows
-            bits: 64
+            target: mingw64
             cross_prefix: x86_64-w64-mingw32-
 
-          - name: LLVM-MinGW x86
-            os: ubuntu-latest
-            target: mingw
-            compiler: llvm-mingw
-            platform: windows
-            bits: 32
-            cross_prefix: i686-w64-mingw32-
-
-          - name: GCC x64
+          - name: ubuntu-gcc-x86_64
             os: ubuntu-latest
             compiler: gcc
-            platform: linux
-            bits: 64
             target: linux-x86_64
 
-          - name: GCC x86
-            os: ubuntu-latest
+          - name: ubuntu-gcc-aarch64
+            os: ubuntu-24.04-arm
             compiler: gcc
-            platform: linux
-            bits: 32
-            target: linux-x86
+            target: linux-aarch64
 
-          - name: Clang x64
+          - name: ubuntu-clang-x86_64
             os: ubuntu-latest
             compiler: clang
-            platform: linux
-            bits: 64
             target: linux-x86_64-clang
 
-          - name: Clang x86
-            os: ubuntu-latest
+          - name: ubuntu-clang-aarch64
+            os: ubuntu-24.04-arm
             compiler: clang
-            platform: linux
-            bits: 32
-            target: linux-x86-clang
+            target: linux-aarch64
+
+    env:
+      OPENSSL_FLAGS_COMMON: zlib enable-rc5 enable-md2 enable-weak-ssl-ciphers no-makedepend
 
     steps:
       - name: Checkout OpenSSL
         uses: actions/checkout@v4
         with:
           repository: openssl/openssl
-          ref: ${{ env.OPENSSL_VERSION_INPUT }}
+          ref: ${{ matrix.version }}
           path: openssl
 
-      - name: Setup MSVC (Windows)
-        if: matrix.compiler == 'msvc'
+      # ==================== MSVC SETUP ====================
+      - name: Setup MSVC
+        if: matrix.config.compiler == 'msvc'
         uses: ilammy/msvc-dev-cmd@v1
         with:
-          arch: ${{ matrix.arch }}
+          arch: ${{ matrix.config.arch }}
 
-      - name: Install NASM and Strawberry Perl (MSVC)
-        if: matrix.compiler == 'msvc'
+      - name: Install NASM + Strawberry Perl (MSVC)
+        if: matrix.config.compiler == 'msvc'
         shell: pwsh
         run: |
           choco install nasm strawberryperl --no-progress -y
-          Write-Output "$env:ChocolateyInstall\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
-          $env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
-          Write-Output "C:\Strawberry\perl\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
-          Write-Output "C:\Strawberry\c\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
 
-      - name: Verify MSVC tools
-        if: matrix.compiler == 'msvc'
+      - name: Build zlib (MSVC)
+        if: matrix.config.compiler == 'msvc'
+        id: zlib-msvc
+        working-directory: openssl
+        shell: pwsh
+        run: |
+          git clone https://github.com/madler/zlib.git --depth 1 ../zlib
+          Set-Location ../zlib
+          nmake -f win32/Makefile.msc
+          $d = (Get-Location).Path
+          echo "zlib_include=$d" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          echo "zlib_lib=$d\zlib.lib" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
+      # ==================== LLVM-MINGW SETUP ====================
+      - name: Setup LLVM-MinGW
+        if: matrix.config.compiler == 'llvm-mingw'
+        run: |
+          V='20240903'
+          F="llvm-mingw-${V}-ucrt-ubuntu-22.04-x86_64.tar.xz"
+          curl -fsSLO "https://github.com/mstorsjo/llvm-mingw/releases/download/${V}/${F}"
+          tar -xf "$F"
+          echo "$(pwd)/llvm-mingw-${V}-ucrt-ubuntu-22.04-x86_64/bin" >> $GITHUB_PATH
+
+      - name: Build zlib (LLVM-MinGW)
+        if: matrix.config.compiler == 'llvm-mingw'
+        id: zlib-mingw
+        working-directory: openssl
+        run: |
+          git clone https://github.com/madler/zlib.git --depth 1 ../zlib-mingw
+          cd ../zlib-mingw
+          PFX=${{ matrix.config.cross_prefix }}
+          CHOST=${PFX%-} CC=${PFX}gcc AR=${PFX}ar RANLIB=${PFX}ranlib ./configure --static --prefix=$PWD/../zlib-install
+          make -j$(nproc) && make install
+          echo "zlib_include=$PWD/../zlib-install/include" >> $GITHUB_OUTPUT
+          echo "zlib_lib=$PWD/../zlib-install/lib" >> $GITHUB_OUTPUT
+
+      # ==================== LINUX SETUP ====================
+      - name: Install zlib + perl (Linux)
+        if: matrix.config.compiler == 'gcc' || matrix.config.compiler == 'clang'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y zlib1g-dev perl
+
+      - name: Install Clang (Linux)
+        if: matrix.config.compiler == 'clang'
+        run: |
+          sudo apt-get install -y clang
+
+      # ==================== VERIFY TOOLS ====================
+      - name: Verify tools (MSVC)
+        if: matrix.config.compiler == 'msvc'
         shell: pwsh
         run: |
           perl --version
           nasm --version
-          nmake /? 2>&1 | Select-Object -First 1
 
-      - name: Setup LLVM-MinGW (Linux)
-        if: matrix.compiler == 'llvm-mingw'
+      - name: Verify tools (LLVM-MinGW)
+        if: matrix.config.compiler == 'llvm-mingw'
         run: |
-          LLVM_MINGW_TAR="llvm-mingw-${{ env.LLVM_MINGW_VERSION }}-${{ env.LLVM_MINGW_UCRT }}-ubuntu-22.04-x86_64.tar.xz"
-          curl -fsSLO "https://github.com/mstorsjo/llvm-mingw/releases/download/${{ env.LLVM_MINGW_VERSION }}/${LLVM_MINGW_TAR}"
-          tar -xf "${LLVM_MINGW_TAR}"
-          echo "$(pwd)/llvm-mingw-${{ env.LLVM_MINGW_VERSION }}-${{ env.LLVM_MINGW_UCRT }}-ubuntu-22.04-x86_64/bin" >> $GITHUB_PATH
+          ${{ matrix.config.cross_prefix }}gcc --version
 
-      - name: Verify LLVM-MinGW tools
-        if: matrix.compiler == 'llvm-mingw'
-        run: |
-          ${{ matrix.cross_prefix }}gcc --version
+      - name: Verify tools (GCC)
+        if: matrix.config.compiler == 'gcc'
+        run: gcc --version
 
-      - name: Install 32-bit multilib (GCC/Linux x86)
-        if: matrix.bits == 32 && matrix.platform == 'linux'
-        run: |
-          sudo dpkg --add-architecture i386
-          sudo apt-get update
-          sudo apt-get install -y gcc-multilib g++-multilib linux-libc-dev:i386 libc6-dev:i386
+      - name: Verify tools (Clang)
+        if: matrix.config.compiler == 'clang'
+        run: clang --version
 
-      - name: Install Clang (Linux)
-        if: matrix.compiler == 'clang'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y clang llvm
-
-      - name: Verify compiler (Unix)
-        if: matrix.os == 'ubuntu-latest' && matrix.compiler != 'llvm-mingw'
-        run: |
-          case "${{ matrix.compiler }}" in
-            gcc) gcc --version ;;
-            clang) clang --version ;;
-          esac
-
-      - name: Install Perl (Unix)
-        if: matrix.os == 'ubuntu-latest'
-        run: |
-          sudo apt-get install -y perl
-
-      - name: Configure OpenSSL (MSVC)
-        if: matrix.compiler == 'msvc'
+      # ==================== CONFIGURE ====================
+      - name: Configure (MSVC)
+        if: matrix.config.compiler == 'msvc'
+        working-directory: openssl
         shell: pwsh
+        run: |
+          perl Configure ${{ matrix.config.target }} ${{ env.OPENSSL_FLAGS_COMMON }} `
+            --with-zlib-include="${{ steps.zlib-msvc.outputs.zlib_include }}" `
+            --with-zlib-lib="${{ steps.zlib-msvc.outputs.zlib_lib }}" `
+            --prefix="./install"
+
+      - name: Configure (LLVM-MinGW)
+        if: matrix.config.compiler == 'llvm-mingw'
         working-directory: openssl
         run: |
-          perl Configure ${{ matrix.target }} --prefix="$env:RUNNER_TEMP\openssl-install" --openssldir="$env:RUNNER_TEMP\openssl-install\ssl" no-makedepend
+          perl Configure ${{ matrix.config.target }} \
+            --cross-compile-prefix=${{ matrix.config.cross_prefix }} \
+            ${{ env.OPENSSL_FLAGS_COMMON }} \
+            --with-zlib-include=${{ steps.zlib-mingw.outputs.zlib_include }} \
+            --with-zlib-lib=${{ steps.zlib-mingw.outputs.zlib_lib }} \
+            --prefix=./install
 
-      - name: Configure OpenSSL (LLVM-MinGW)
-        if: matrix.compiler == 'llvm-mingw'
+      - name: Configure (GCC x86_64 / Clang x86_64)
+        if: (matrix.config.compiler == 'gcc' || matrix.config.compiler == 'clang') && matrix.config.target != 'linux-aarch64'
         working-directory: openssl
         run: |
-          perl Configure ${{ matrix.target }} --cross-compile-prefix=${{ matrix.cross_prefix }} --prefix=/tmp/openssl-install --openssldir=/tmp/openssl-install/ssl no-makedepend
+          perl Configure ${{ matrix.config.target }} \
+            ${{ env.OPENSSL_FLAGS_COMMON }} \
+            --prefix=./install
 
-      - name: Configure OpenSSL (GCC/Clang Linux)
-        if: matrix.os == 'ubuntu-latest' && matrix.compiler != 'llvm-mingw'
+      - name: Configure (GCC/Clang aarch64)
+        if: (matrix.config.compiler == 'gcc' || matrix.config.compiler == 'clang') && matrix.config.target == 'linux-aarch64'
         working-directory: openssl
         run: |
-          perl Configure ${{ matrix.target }} --prefix=/tmp/openssl-install --openssldir=/tmp/openssl-install/ssl no-makedepend
+          export CC=${{ matrix.config.compiler }}
+          export CXX=${{ matrix.config.compiler == 'gcc' && 'g++' || 'clang++' }}
+          perl Configure linux-aarch64 \
+            ${{ env.OPENSSL_FLAGS_COMMON }} \
+            --prefix=./install
 
-      - name: Build OpenSSL (MSVC)
-        if: matrix.compiler == 'msvc'
+      # ==================== BUILD ====================
+      - name: Build (MSVC)
+        if: matrix.config.compiler == 'msvc'
+        working-directory: openssl
+        timeout-minutes: 60
         shell: pwsh
-        working-directory: openssl
         run: nmake
 
-      - name: Build OpenSSL (Unix)
-        if: matrix.os == 'ubuntu-latest'
+      - name: Build (Unix)
+        if: matrix.config.compiler != 'msvc'
         working-directory: openssl
+        timeout-minutes: 60
         run: make -j$(nproc)
 
-      - name: Test OpenSSL (MSVC)
-        if: matrix.compiler == 'msvc'
-        shell: pwsh
+      # ==================== TEST ====================
+      - name: Test (MSVC)
+        if: matrix.config.compiler == 'msvc'
         working-directory: openssl
+        timeout-minutes: 120
+        shell: pwsh
         run: nmake test
 
-      - name: Test OpenSSL (Unix)
-        if: matrix.os == 'ubuntu-latest' && matrix.compiler != 'llvm-mingw'
+      - name: Test (GCC/Clang)
+        if: matrix.config.compiler == 'gcc' || matrix.config.compiler == 'clang'
         working-directory: openssl
-        run: |
-          make -j$(nproc) test
+        timeout-minutes: 120
+        run: make -j$(nproc) test
 
-      - name: Install OpenSSL (MSVC)
-        if: matrix.compiler == 'msvc'
-        shell: pwsh
+      # Skip LLVM-MinGW tests (cross-compiled binary)
+
+      # ==================== INSTALL ====================
+      - name: Install (MSVC)
+        if: matrix.config.compiler == 'msvc'
         working-directory: openssl
+        shell: pwsh
         run: nmake install
 
-      - name: Install OpenSSL (Unix)
-        if: matrix.os == 'ubuntu-latest'
+      - name: Install (Unix)
+        if: matrix.config.compiler != 'msvc'
         working-directory: openssl
         run: make install
 
-      - name: Upload artifacts (Windows MSVC)
-        if: matrix.compiler == 'msvc'
-        uses: actions/upload-artifact@v4
-        with:
-          name: openssl-${{ matrix.name }}
-          path: ${{ runner.temp }}\openssl-install
+      # ==================== VERIFY ====================
+      - name: Verify (GCC/Clang)
+        if: matrix.config.compiler == 'gcc' || matrix.config.compiler == 'clang'
+        working-directory: openssl
+        run: |
+          ./install/bin/openssl version
+          ./install/bin/openssl list -providers
+          ./install/bin/openssl ciphers -v ALL:COMPLEMENTOFALL | head -20
 
-      - name: Upload artifacts (Unix)
-        if: matrix.os == 'ubuntu-latest'
+      - name: Verify (LLVM-MinGW)
+        if: matrix.config.compiler == 'llvm-mingw'
+        working-directory: openssl
+        run: |
+          file ./install/bin/openssl.exe
+
+      - name: Verify (MSVC)
+        if: matrix.config.compiler == 'msvc'
+        shell: pwsh
+        working-directory: openssl
+        run: |
+          & ./install/bin/openssl.exe version
+          & ./install/bin/openssl.exe list -providers
+          & ./install/bin/openssl.exe ciphers -v ALL:COMPLEMENTOFALL | Select-Object -First 20
+
+      # ==================== UPLOAD ====================
+      - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: openssl-${{ matrix.name }}
-          path: /tmp/openssl-install
+          name: openssl-${{ matrix.version }}-${{ matrix.config.name }}
+          path: openssl/install
