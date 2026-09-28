@@ -8,7 +8,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   detect-versions:
@@ -26,15 +26,30 @@ jobs:
           r = subprocess.run(['git', 'ls-remote', '--tags',
               'https://github.com/openssl/openssl.git'],
               capture_output=True, text=True)
-          tags = re.findall(r'refs/tags/(openssl-(3|4)\.\d+\.\d+)$', r.stdout, re.M)
-          stable = [t[0] for t in tags]
-          versions = sorted(set(stable),
+
+          # All version-like tags within 3.x / 4.x (including pre-releases)
+          all_tags = re.findall(r'refs/tags/(openssl-(?:3|4)\.\d+\.\d+(?:-[a-z]+\d+)?)$', r.stdout, re.M)
+
+          def sort_key(v):
+              v = v.replace('openssl-', '')
+              parts = v.split('-')
+              ver = tuple(int(x) for x in parts[0].split('.'))
+              if len(parts) > 1:
+                  return ver + (parts[1],)
+              return ver + ('~~',)
+
+          all_sorted = sorted(set(all_tags), key=sort_key, reverse=True)
+          latest_overall = all_sorted[0]
+
+          # Stable only (no suffix)
+          stable = [t for t in all_tags if re.match(r'^openssl-\d+\.\d+\.\d+$', t)]
+          stable_sorted = sorted(set(stable),
               key=lambda v: tuple(int(x) for x in v.replace('openssl-','').split('.')),
               reverse=True)
-          latest = versions[0]
+          latest_stable = stable_sorted[0]
 
           specific = ['openssl-3.0.22', 'openssl-3.6.4']
-          all_versions = specific + [latest]
+          all_versions = specific + [latest_stable, latest_overall]
           seen = set()
           unique = []
           for v in all_versions:
@@ -288,9 +303,58 @@ jobs:
           & $env:GITHUB_WORKSPACE\openssl\install\bin\openssl.exe list -providers
           & $env:GITHUB_WORKSPACE\openssl\install\bin\openssl.exe ciphers -v ALL:COMPLEMENTOFALL | Select-Object -First 20
 
-      # ==================== UPLOAD ====================
+      # ==================== UPLOAD ARTIFACTS ====================
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
           name: openssl-${{ matrix.version }}-${{ matrix.config.name }}
           path: ${{ github.workspace }}/openssl/install
+
+  release:
+    name: Release ${{ matrix.version }}
+    needs: [detect-versions, build]
+    if: success()
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJson(needs.detect-versions.outputs.versions) }}
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: openssl-${{ matrix.version }}-*
+          path: artifacts
+
+      - name: Create tar.gz archives
+        run: |
+          cd artifacts
+          for d in */; do
+            name="${d%/}"
+            echo "Archiving $name..."
+            tar -czf "${name}.tar.gz" "$name"
+          done
+          ls -la *.tar.gz
+
+      - name: Create Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="build/${{ matrix.version }}"
+          if gh release view "$TAG" &>/dev/null; then
+            echo "Release '$TAG' already exists, skipping"
+            exit 0
+          fi
+          gh release create "$TAG" artifacts/*.tar.gz \
+            --title "OpenSSL ${{ matrix.version }}" \
+            --notes "Prebuilt OpenSSL ${{ matrix.version }} binaries.
+
+          Built with: zlib compression, rc5, md2, weak-ssl-ciphers
+
+          Platforms:
+          - windows-msvc (x64)
+          - windows-llvm-mingw (x64 cross-compile)
+          - ubuntu-gcc-x86_64
+          - ubuntu-gcc-aarch64
+          - ubuntu-clang-x86_64
+          - ubuntu-clang-aarch64"
