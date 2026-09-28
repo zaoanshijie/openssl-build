@@ -1,3 +1,4 @@
 /openssl/
 *.log
 *.tmp
+opencode.json
