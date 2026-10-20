@@ -4,14 +4,33 @@
 
 ## 编译配置
 
-| 组 | 编译器 | 架构 | 目标平台 | Runner |
-|----|--------|------|----------|--------|
-| windows-msvc | Visual Studio 2022 (MSVC) | x64 | Windows | windows-latest |
-| windows-llvm-mingw | LLVM-MinGW (Clang) | x64 | Windows (交叉编译) | ubuntu-latest |
-| ubuntu-gcc-x86_64 | GCC | x86_64 | Linux | ubuntu-latest |
-| ubuntu-gcc-aarch64 | GCC | aarch64 | Linux | ubuntu-24.04-arm |
-| ubuntu-clang-x86_64 | Clang | x86_64 | Linux | ubuntu-latest |
-| ubuntu-clang-aarch64 | Clang | aarch64 | Linux | ubuntu-24.04-arm |
+| 组 | 编译器 | 架构 | Runner | glibc 基线 |
+|----|--------|------|--------|-----------|
+| windows-msvc | Visual Studio 2022 (MSVC) | x64 | windows-2025 | - |
+| windows-llvm-mingw | LLVM-MinGW (Clang) | x64 | ubuntu-24.04 | - |
+| ubuntu-24.04-gcc-x86_64 | GCC 13 | x86_64 | ubuntu-24.04 | >= 2.39 |
+| ubuntu-24.04-gcc-aarch64 | GCC 13 | aarch64 | ubuntu-24.04-arm | >= 2.39 |
+| ubuntu-24.04-clang-x86_64 | Clang 18 | x86_64 | ubuntu-24.04 | >= 2.39 |
+| ubuntu-24.04-clang-aarch64 | Clang 18 | aarch64 | ubuntu-24.04-arm | >= 2.39 |
+| ubuntu-22.04-gcc-x86_64 | GCC 11 | x86_64 | ubuntu-22.04 | >= 2.35 |
+| ubuntu-22.04-gcc-aarch64 | GCC 11 | aarch64 | ubuntu-22.04-arm | >= 2.35 |
+
+### 该选哪个 Linux 产物？
+
+- **Ubuntu 24.04 产物**：编译器 / glibc 更新，性能与优化更好，适用于 Ubuntu 24.04+、Debian 13+ 以及各滚动发行版（Fedora、Arch 等）。
+- **Ubuntu 22.04 产物**：glibc 基线更低（2.35），可向下兼容 Ubuntu 22.04、Debian 12、CentOS Stream 9 / RHEL 9 等旧系统；在更高版本系统上同样可直接运行。
+
+> 链接了 glibc 的二进制无法在低于编译时 glibc 版本的系统上运行，需要覆盖旧系统时优先用 22.04 产物。
+
+每个产物包内的 `BUILD_INFO.txt` 记录了实际使用的 runner、编译器版本、glibc 版本与 OpenSSL 版本，可直接据此判断兼容性。
+
+## Runner 版本策略
+
+所有任务均**显式钉住** runner 镜像版本，不使用 `ubuntu-latest` / `windows-latest`：
+
+- `ubuntu-latest` 自 2026-10-19 起陆续从 Ubuntu 24.04 迁移到 26.04，同一份 workflow 在不同时间会落到不同镜像，导致产物的编译器与 glibc 版本发生漂移。
+- 因此固定为 `ubuntu-24.04` / `ubuntu-24.04-arm`，另加 `ubuntu-22.04` / `ubuntu-22.04-arm` 作为低 glibc 基线产物。
+- 升级到 Ubuntu 26.04 时，只需把对应条目的 `os` 改为 `ubuntu-26.04` / `ubuntu-26.04-arm`，并新增一组配置名，避免覆盖已有产物。
 
 ## 编译特性
 
@@ -35,7 +54,7 @@ Detect Versions → Build Matrix (版本 × 配置) → Create Release
 
 每个平台执行：`Configure → Build (make/nmake) → Test → Install → Verify → Upload Artifact`
 
-Release 阶段下载同版本所有平台的 Artifacts，打包为 `.tar.gz` 并上传到 GitHub Release，已存在的 Release 自动跳过。
+Release 阶段下载同版本所有平台的 Artifacts，打包为 `.tar.gz` 并上传到 GitHub Release。若该版本的 Release 已存在，则**不重建、不覆盖已有资产，只补传缺失的产物**并同步更新说明——因此新增编译平台后重新运行即可把新产物补进历史 Release。
 
 ## Release 下载
 

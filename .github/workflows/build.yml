@@ -10,10 +10,16 @@ on:
 permissions:
   contents: write
 
+# 说明：所有 Linux 任务均显式指定 runner 镜像版本，不再使用 ubuntu-latest。
+#   ubuntu-latest 自 2026-10-19 起陆续从 24.04 迁移到 26.04，同一份 workflow
+#   在不同时间会落到不同镜像上，导致产物（编译器 / glibc 版本）漂移。
+#   此处固定为 ubuntu-24.04 / ubuntu-24.04-arm，并额外提供 ubuntu-22.04 /
+#   ubuntu-22.04-arm 构建以覆盖更低 glibc 基线的使用场景。
+
 jobs:
   detect-versions:
     name: Detect OpenSSL versions
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     outputs:
       versions: ${{ steps.versions.outputs.versions }}
     steps:
@@ -71,37 +77,56 @@ jobs:
       matrix:
         version: ${{ fromJson(needs.detect-versions.outputs.versions) }}
         config:
+          # ---------- Windows ----------
           - name: windows-msvc
-            os: windows-latest
+            os: windows-2025
             compiler: msvc
             target: VC-WIN64A
             arch: amd64
 
           - name: windows-llvm-mingw
-            os: ubuntu-latest
+            os: ubuntu-24.04
             compiler: llvm-mingw
             target: mingw64
             cross_prefix: x86_64-w64-mingw32-
 
-          - name: ubuntu-gcc-x86_64
-            os: ubuntu-latest
+          # ---------- Ubuntu 24.04 (glibc 2.39) ----------
+          - name: ubuntu-24.04-gcc-x86_64
+            os: ubuntu-24.04
             compiler: gcc
             target: linux-x86_64
+            arch: x86_64
 
-          - name: ubuntu-gcc-aarch64
+          - name: ubuntu-24.04-gcc-aarch64
             os: ubuntu-24.04-arm
             compiler: gcc
             target: linux-aarch64
+            arch: aarch64
 
-          - name: ubuntu-clang-x86_64
-            os: ubuntu-latest
+          - name: ubuntu-24.04-clang-x86_64
+            os: ubuntu-24.04
             compiler: clang
             target: linux-x86_64-clang
+            arch: x86_64
 
-          - name: ubuntu-clang-aarch64
+          - name: ubuntu-24.04-clang-aarch64
             os: ubuntu-24.04-arm
             compiler: clang
             target: linux-aarch64
+            arch: aarch64
+
+          # ---------- Ubuntu 22.04 (glibc 2.35，向下兼容旧系统) ----------
+          - name: ubuntu-22.04-gcc-x86_64
+            os: ubuntu-22.04
+            compiler: gcc
+            target: linux-x86_64
+            arch: x86_64
+
+          - name: ubuntu-22.04-gcc-aarch64
+            os: ubuntu-22.04-arm
+            compiler: gcc
+            target: linux-aarch64
+            arch: aarch64
 
     env:
       OPENSSL_FLAGS_COMMON: zlib enable-rc5 enable-md2 enable-weak-ssl-ciphers no-makedepend
@@ -190,11 +215,17 @@ jobs:
 
       - name: Verify tools (GCC)
         if: matrix.config.compiler == 'gcc'
-        run: gcc --version
+        run: |
+          gcc --version
+          . /etc/os-release && echo "Runner OS: $PRETTY_NAME"
+          ldd --version | head -1
 
       - name: Verify tools (Clang)
         if: matrix.config.compiler == 'clang'
-        run: clang --version
+        run: |
+          clang --version
+          . /etc/os-release && echo "Runner OS: $PRETTY_NAME"
+          ldd --version | head -1
 
       # ==================== CONFIGURE ====================
       - name: Configure (MSVC)
@@ -303,6 +334,44 @@ jobs:
           & $env:GITHUB_WORKSPACE\openssl\install\bin\openssl.exe list -providers
           & $env:GITHUB_WORKSPACE\openssl\install\bin\openssl.exe ciphers -v ALL:COMPLEMENTOFALL | Select-Object -First 20
 
+      # ==================== BUILD INFO ====================
+      # 记录构建环境，方便使用者判断产物所需的 glibc / 编译器版本
+      - name: Write BUILD_INFO (Unix)
+        if: matrix.config.compiler != 'msvc'
+        working-directory: openssl
+        run: |
+          COMPILER_BIN=${{ matrix.config.compiler }}
+          if [ "$COMPILER_BIN" = "llvm-mingw" ]; then
+            COMPILER_BIN="${{ matrix.config.cross_prefix }}gcc"
+          fi
+          {
+            echo "openssl_version: ${{ matrix.version }}"
+            echo "build_config:    ${{ matrix.config.name }}"
+            echo "runner:          ${{ matrix.config.os }}"
+            echo "target:          ${{ matrix.config.target }}"
+            echo "compiler:        $("$COMPILER_BIN" --version 2>/dev/null | head -1)"
+            if [ -f /etc/os-release ]; then . /etc/os-release; echo "runner_os:       $PRETTY_NAME"; fi
+            echo "glibc:           $(ldd --version 2>/dev/null | head -1)"
+            echo "built_at:        $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo "commit:          ${{ github.sha }}"
+          } > $GITHUB_WORKSPACE/openssl/install/BUILD_INFO.txt
+          cat $GITHUB_WORKSPACE/openssl/install/BUILD_INFO.txt
+
+      - name: Write BUILD_INFO (MSVC)
+        if: matrix.config.compiler == 'msvc'
+        shell: pwsh
+        working-directory: openssl
+        run: |
+          $info = @(
+            "openssl_version: ${{ matrix.version }}"
+            "build_config:    ${{ matrix.config.name }}"
+            "runner:          ${{ matrix.config.os }}"
+            "target:          ${{ matrix.config.target }}"
+            "built_at:        $((Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ'))"
+            "commit:          ${{ github.sha }}"
+          )
+          $info | Out-File -FilePath "$env:GITHUB_WORKSPACE\openssl\install\BUILD_INFO.txt" -Encoding utf8
+
       # ==================== UPLOAD ARTIFACTS ====================
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
@@ -314,7 +383,7 @@ jobs:
     name: Release ${{ matrix.version }}
     needs: [detect-versions, build]
     if: success()
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
@@ -339,30 +408,53 @@ jobs:
           done
           ls -la *.tar.gz
 
-      - name: Create Release
+      - name: Create or update Release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           TAG="build/${{ matrix.version }}"
-          if gh release view "$TAG" &>/dev/null; then
-            echo "Release '$TAG' already exists, skipping"
-            exit 0
-          fi
-          PRE_FLAG=""
-          if echo "${{ matrix.version }}" | grep -qiE '-(alpha|beta|dev|rc)'; then
-            PRE_FLAG="--prerelease"
-          fi
-          gh release create "$TAG" artifacts/*.tar.gz \
-            --title "OpenSSL ${{ matrix.version }}" \
-            --notes "Prebuilt OpenSSL ${{ matrix.version }} binaries.
+          NOTES_FILE=$(mktemp)
+          cat > "$NOTES_FILE" <<'EOF'
+          Prebuilt OpenSSL ${{ matrix.version }} binaries.
 
           Built with: zlib compression, rc5, md2, weak-ssl-ciphers
 
           Platforms:
-          - windows-msvc (x64)
+          - windows-msvc (x64, Windows Server 2025)
           - windows-llvm-mingw (x64 cross-compile)
-          - ubuntu-gcc-x86_64
-          - ubuntu-gcc-aarch64
-          - ubuntu-clang-x86_64
-          - ubuntu-clang-aarch64" \
-            $PRE_FLAG
+          - ubuntu-24.04-gcc-x86_64        (glibc >= 2.39)
+          - ubuntu-24.04-gcc-aarch64       (glibc >= 2.39)
+          - ubuntu-24.04-clang-x86_64      (glibc >= 2.39)
+          - ubuntu-24.04-clang-aarch64     (glibc >= 2.39)
+          - ubuntu-22.04-gcc-x86_64        (glibc >= 2.35)
+          - ubuntu-22.04-gcc-aarch64       (glibc >= 2.35)
+
+          Each archive contains a BUILD_INFO.txt with the exact toolchain used.
+          EOF
+
+          PRE_FLAG=""
+          if echo "${{ matrix.version }}" | grep -qiE -- '-(alpha|beta|dev|rc)'; then
+            PRE_FLAG="--prerelease"
+          fi
+
+          if gh release view "$TAG" &>/dev/null; then
+            # 已存在：只补传缺失的产物，不覆盖既有资产
+            # （新增编译平台时不会因为 Release 早已存在而被静默跳过）
+            echo "Release '$TAG' 已存在，检查缺失资产"
+            EXISTING=$(gh release view "$TAG" --json assets --jq '.assets[].name')
+            for f in artifacts/*.tar.gz; do
+              n=$(basename "$f")
+              if echo "$EXISTING" | grep -qxF "$n"; then
+                echo "  已存在，跳过: $n"
+              else
+                echo "  上传新资产: $n"
+                gh release upload "$TAG" "$f"
+              fi
+            done
+            gh release edit "$TAG" --notes-file "$NOTES_FILE"
+          else
+            gh release create "$TAG" artifacts/*.tar.gz \
+              --title "OpenSSL ${{ matrix.version }}" \
+              --notes-file "$NOTES_FILE" \
+              $PRE_FLAG
+          fi
