@@ -408,22 +408,14 @@ jobs:
           done
           ls -la *.tar.gz
 
-      - name: Create Release
+      - name: Create or update Release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           TAG="build/${{ matrix.version }}"
-          if gh release view "$TAG" &>/dev/null; then
-            echo "Release '$TAG' already exists, skipping"
-            exit 0
-          fi
-          PRE_FLAG=""
-          if echo "${{ matrix.version }}" | grep -qiE '-(alpha|beta|dev|rc)'; then
-            PRE_FLAG="--prerelease"
-          fi
-          gh release create "$TAG" artifacts/*.tar.gz \
-            --title "OpenSSL ${{ matrix.version }}" \
-            --notes "Prebuilt OpenSSL ${{ matrix.version }} binaries.
+          NOTES_FILE=$(mktemp)
+          cat > "$NOTES_FILE" <<'EOF'
+          Prebuilt OpenSSL ${{ matrix.version }} binaries.
 
           Built with: zlib compression, rc5, md2, weak-ssl-ciphers
 
@@ -437,5 +429,32 @@ jobs:
           - ubuntu-22.04-gcc-x86_64        (glibc >= 2.35)
           - ubuntu-22.04-gcc-aarch64       (glibc >= 2.35)
 
-          Each archive contains a BUILD_INFO.txt with the exact toolchain used." \
-            $PRE_FLAG
+          Each archive contains a BUILD_INFO.txt with the exact toolchain used.
+          EOF
+
+          PRE_FLAG=""
+          if echo "${{ matrix.version }}" | grep -qiE -- '-(alpha|beta|dev|rc)'; then
+            PRE_FLAG="--prerelease"
+          fi
+
+          if gh release view "$TAG" &>/dev/null; then
+            # 已存在：只补传缺失的产物，不覆盖既有资产
+            # （新增编译平台时不会因为 Release 早已存在而被静默跳过）
+            echo "Release '$TAG' 已存在，检查缺失资产"
+            EXISTING=$(gh release view "$TAG" --json assets --jq '.assets[].name')
+            for f in artifacts/*.tar.gz; do
+              n=$(basename "$f")
+              if echo "$EXISTING" | grep -qxF "$n"; then
+                echo "  已存在，跳过: $n"
+              else
+                echo "  上传新资产: $n"
+                gh release upload "$TAG" "$f"
+              fi
+            done
+            gh release edit "$TAG" --notes-file "$NOTES_FILE"
+          else
+            gh release create "$TAG" artifacts/*.tar.gz \
+              --title "OpenSSL ${{ matrix.version }}" \
+              --notes-file "$NOTES_FILE" \
+              $PRE_FLAG
+          fi
