@@ -54,7 +54,7 @@ Detect Versions → Build Matrix (版本 × 配置) → Create Release
 
 每个平台执行：`Configure → Build (make/nmake) → Test → Install → Verify → Upload Artifact`
 
-Release 阶段下载同版本所有平台的 Artifacts，打包为 `.tar.gz` 并上传到 GitHub Release，已存在的 Release 自动跳过。
+Release 阶段下载同版本所有平台的 Artifacts，打包为 `.tar.gz` 并上传到 GitHub Release。若该版本的 Release 已存在，则**不重建、不覆盖已有资产，只补传缺失的产物**并同步更新说明——因此新增编译平台后重新运行即可把新产物补进历史 Release。
 
 ## Release 下载
 
