@@ -6,6 +6,11 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      versions:
+        description: '手动指定版本（逗号分隔，如 openssl-4.0.2,openssl-3.6.4）；留空 = 自动检测最新版本'
+        required: false
+        default: ''
 
 permissions:
   contents: write
@@ -25,7 +30,20 @@ jobs:
     steps:
       - name: Detect stable releases
         id: versions
+        env:
+          VERSIONS_OVERRIDE: ${{ github.event.inputs.versions }}
         run: |
+          # 手动指定版本优先（用于补建历史版本或单独重跑某个版本）
+          if [ -n "${VERSIONS_OVERRIDE:-}" ]; then
+            VERSIONS=$(python3 -c "
+          import json, sys
+          print(json.dumps([v.strip() for v in sys.argv[1].split(',') if v.strip()]))
+          " "$VERSIONS_OVERRIDE")
+            echo "使用手动指定版本: $VERSIONS"
+            echo "versions=$VERSIONS" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
           VERSIONS=$(python3 -c "
           import subprocess, re, json
 
@@ -376,7 +394,8 @@ jobs:
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: openssl-${{ matrix.version }}-${{ matrix.config.name }}
+          # matrix.version 本身已带 openssl- 前缀，此处不再重复添加
+          name: ${{ matrix.version }}-${{ matrix.config.name }}
           path: ${{ github.workspace }}/openssl/install
 
   release:
@@ -395,7 +414,7 @@ jobs:
       - name: Download artifacts
         uses: actions/download-artifact@v4
         with:
-          pattern: openssl-${{ matrix.version }}-*
+          pattern: ${{ matrix.version }}-*
           path: artifacts
 
       - name: Create tar.gz archives
@@ -432,9 +451,22 @@ jobs:
           Each archive contains a BUILD_INFO.txt with the exact toolchain used.
           EOF
 
-          PRE_FLAG=""
-          if echo "${{ matrix.version }}" | grep -qiE -- '-(alpha|beta|dev|rc)'; then
-            PRE_FLAG="--prerelease"
+          # 产物是否为预发布：完全跟随上游 openssl/openssl 对该版本 Release 的标记
+          # 源码 tag 是正式 release -> 产物就是 release；源码是 prerelease -> 产物也是 prerelease
+          SRC_PRE=""
+          UPSTREAM=$(gh api "repos/openssl/openssl/releases/tags/${{ matrix.version }}" \
+            --jq '.prerelease' 2>/dev/null || true)
+          if [ "$UPSTREAM" = "true" ] || [ "$UPSTREAM" = "false" ]; then
+            SRC_PRE="$UPSTREAM"
+            echo "上游 Release 标记: prerelease=$SRC_PRE"
+          else
+            # 上游没有对应 Release 条目（老版本常见），退回 tag 命名推断
+            if echo "${{ matrix.version }}" | grep -qiE -- '-(alpha|beta|rc|dev)'; then
+              SRC_PRE="true"
+            else
+              SRC_PRE="false"
+            fi
+            echo "上游无 Release 条目，按 tag 命名推断: prerelease=$SRC_PRE"
           fi
 
           if gh release view "$TAG" &>/dev/null; then
@@ -451,8 +483,18 @@ jobs:
                 gh release upload "$TAG" "$f"
               fi
             done
+            # 标记与上游不一致时纠正（历史上 grep 选项 bug 导致 prerelease 从未生效）
+            CUR_PRE=$(gh release view "$TAG" --json isPrerelease --jq '.isPrerelease')
+            if [ "$CUR_PRE" != "$SRC_PRE" ]; then
+              echo "纠正 prerelease 标记: $CUR_PRE -> $SRC_PRE"
+              gh release edit "$TAG" --prerelease="$SRC_PRE"
+            fi
             gh release edit "$TAG" --notes-file "$NOTES_FILE"
           else
+            PRE_FLAG="--prerelease=false"
+            if [ "$SRC_PRE" = "true" ]; then
+              PRE_FLAG="--prerelease"
+            fi
             gh release create "$TAG" artifacts/*.tar.gz \
               --title "OpenSSL ${{ matrix.version }}" \
               --notes-file "$NOTES_FILE" \
