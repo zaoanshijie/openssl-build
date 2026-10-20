@@ -44,7 +44,13 @@
 - 每日 `UTC 1:00` 自动检测 OpenSSL 最新版本
 - 固定编译 `openssl-3.0.22` 和 `openssl-3.6.4`
 - 同时编译最新稳定版和绝对最新版（含预发布）
-- 预发布版本自动标记为 GitHub Prerelease
+- **产物是否为 Prerelease 完全跟随上游**：查询 `openssl/openssl` 对该 tag 的 Release 是否标记 prerelease，上游是正式版则产物也是正式版，上游是预发布则产物也是预发布（上游没有对应 Release 条目时退回按 tag 名 `-alpha/-beta/-rc/-dev` 推断）
+
+## 产物命名
+
+```
+openssl-<版本>-<编译配置>.tar.gz     例：openssl-3.6.4-ubuntu-22.04-gcc-x86_64.tar.gz
+```
 
 ## 工作流
 
@@ -63,3 +69,9 @@ Release 阶段下载同版本所有平台的 Artifacts，打包为 `.tar.gz` 并
 ## 手动触发
 
 在 [Actions](https://github.com/zaoanshijie/openssl-build/actions) 页面选择 **Build OpenSSL** → **Run workflow**。
+
+支持可选的 `versions` 参数：填入逗号分隔的版本 tag 可只构建指定版本（例如 `openssl-4.0.2`），留空则按自动检测的最新版本构建。
+
+```bash
+gh workflow run build.yml -R zaoanshijie/openssl-build -f versions=openssl-4.0.2
+```
