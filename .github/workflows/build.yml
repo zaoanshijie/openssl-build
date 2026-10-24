@@ -391,10 +391,22 @@ jobs:
           $info | Out-File -FilePath "$env:GITHUB_WORKSPACE\openssl\install\BUILD_INFO.txt" -Encoding utf8
 
       # ==================== UPLOAD ARTIFACTS ====================
+      # GitHub Artifact Service 偶发超时（CreateArtifact 5 次重试后仍失败），
+      # 会导致整个构建白做、Release 也被跳过。这里首次上传允许失败，
+      # 由下一步立即重试一次；重试仍失败则 job 真实失败（Release 不会静默缺产物）。
       - name: Upload artifacts
+        id: upload-artifact
+        continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
           # matrix.version 本身已带 openssl- 前缀，此处不再重复添加
+          name: ${{ matrix.version }}-${{ matrix.config.name }}
+          path: ${{ github.workspace }}/openssl/install
+
+      - name: Upload artifacts (retry on transient failure)
+        if: steps.upload-artifact.outcome == 'failure'
+        uses: actions/upload-artifact@v4
+        with:
           name: ${{ matrix.version }}-${{ matrix.config.name }}
           path: ${{ github.workspace }}/openssl/install
 
