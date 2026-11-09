@@ -186,12 +186,44 @@ jobs:
       # ==================== LLVM-MINGW SETUP ====================
       - name: Setup LLVM-MinGW
         if: matrix.config.compiler == 'llvm-mingw'
+        env:
+          LLVM_MINGW_VERSION: '20260922'
         run: |
-          V='20260922'
+          V="${LLVM_MINGW_VERSION}"
           F="llvm-mingw-${V}-ucrt-ubuntu-22.04-x86_64.tar.xz"
-          curl -fsSLO "https://github.com/mstorsjo/llvm-mingw/releases/download/${V}/${F}"
+          URL="https://github.com/mstorsjo/llvm-mingw/releases/download/${V}/${F}"
+
+          # release-assets.githubusercontent.com 偶发 504 / 连接重置：
+          # 2026-11-09 的定时构建里两个 windows-llvm-mingw 任务都因为在
+          # 这里裸 curl 拿到 HTTP 504 而直接失败，整个矩阵连带 Release 全被跳过。
+          # 这里改成带重试的下载 + 压缩包完整性校验，单次 CDN 抖动不再打挂任务。
+          ok=0
+          for i in 1 2 3 4 5 6; do
+            echo "== 下载 ${F}（第 ${i}/6 次尝试）=="
+            rm -f "$F"
+            if curl -fSL --retry 5 --retry-delay 5 --retry-all-errors \
+                 --connect-timeout 20 --max-time 900 \
+                 -o "$F" "$URL"; then
+              # CDN 异常时可能返回被截断的响应，解压前先校验
+              if [ "$(stat -c%s "$F" 2>/dev/null || echo 0)" -gt 10000000 ] \
+                 && tar -tf "$F" >/dev/null 2>&1; then
+                ok=1
+                break
+              fi
+              echo "压缩包不完整，准备重新下载"
+            else
+              echo "下载失败（curl 退出码 $?），准备重试"
+            fi
+            sleep $((i * 5))
+          done
+          if [ "$ok" != "1" ]; then
+            echo "::error::llvm-mingw ${V} 多次重试后仍无法下载，请检查上游 Release 或 CDN 状态"
+            exit 1
+          fi
+
           tar -xf "$F"
           echo "$(pwd)/llvm-mingw-${V}-ucrt-ubuntu-22.04-x86_64/bin" >> $GITHUB_PATH
+          echo "llvm-mingw ${V} 已就绪"
 
       - name: Build zlib (LLVM-MinGW)
         if: matrix.config.compiler == 'llvm-mingw'
